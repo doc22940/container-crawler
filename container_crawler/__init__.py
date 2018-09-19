@@ -77,8 +77,8 @@ class ContainerJob(object):
 
 
 class ContainerCrawler(object):
-    def __init__(self, conf, handler_class, logger=None):
-        if not handler_class:
+    def __init__(self, conf, handler_factory, logger=None):
+        if not handler_factory:
             raise RuntimeError('Handler class must be defined')
 
         self.logger = logger
@@ -93,7 +93,7 @@ class ContainerCrawler(object):
         self.myips = whataremyips('0.0.0.0')
         self.items_chunk = conf['items_chunk']
         self.poll_interval = conf.get('poll_interval', 5)
-        self.handler_class = handler_class
+        self.handler_factory = handler_factory
         self._in_progress_containers = set()
 
         if self.bulk:
@@ -173,8 +173,8 @@ class ContainerCrawler(object):
                     break
 
                 settings, per_account = work
-                handler = self.handler_class(self.status_dir, settings,
-                                             per_account=per_account)
+                handler = self.handler_factory.instance(
+                    settings, per_account=per_account)
                 owned, verified, last_row, db_id = self.handle_container(
                     handler, job)
                 if not owned and not verified:
@@ -198,7 +198,7 @@ class ContainerCrawler(object):
                 container = settings['container']
                 self.log('error', "Failed to process %s/%s with %s" % (
                     account, container,
-                    self.handler_class.__name__))
+                    str(self.handler_factory)))
                 self.log('error', traceback.format_exc())
             finally:
                 if work:

@@ -16,8 +16,8 @@ class TestContainerCrawler(unittest.TestCase):
     def setUp(self, mock_ring, mock_ic):
         self.mock_ring = mock.Mock()
         mock_ring.return_value = self.mock_ring
-        self.mock_handler = mock.Mock()
-        self.mock_handler.__name__ = 'MockHandler'
+        self.mock_handler_factory = mock.Mock(
+            __str__=lambda obj: 'MockHandler')
 
         self.mock_ic = mock.Mock()
         mock_ic.return_value = self.mock_ic
@@ -26,7 +26,7 @@ class TestContainerCrawler(unittest.TestCase):
                      'items_chunk': 1000,
                      'status_dir': '/var/scratch'}
         self.crawler = container_crawler.ContainerCrawler(
-            self.conf, self.mock_handler)
+            self.conf, self.mock_handler_factory)
         self.container_job = container_crawler.ContainerJob()
 
     def test_process_items(self):
@@ -37,8 +37,8 @@ class TestContainerCrawler(unittest.TestCase):
             for node_id in range(0, nodes):
                 self.container_job._reset()
                 mock_handler = mock.Mock()
-                self.crawler.handler_class = mock.Mock()
-                self.crawler.handler_class.return_value = mock_handler
+                self.crawler.handler_factory = mock.Mock(
+                    instance=mock.Mock(return_value=mock_handler))
                 handle_calls = filter(lambda x: x % nodes == node_id,
                                       range(0, total_rows))
                 verify_calls = filter(lambda x: x not in handle_calls,
@@ -63,15 +63,15 @@ class TestContainerCrawler(unittest.TestCase):
                 mock.patch('container_crawler.Ring',
                            return_value=self.mock_ring):
             self.crawler = container_crawler.ContainerCrawler(
-                self.conf, self.mock_handler)
+                self.conf, self.mock_handler_factory)
         self.assertEqual(self.crawler.bulk, True)
 
         total_rows = 20
         items = [{'ROWID': x} for x in range(0, total_rows)]
         mock_handler = mock.Mock()
-        self.crawler.handler_class = mock.Mock()
         mock_handler.handle.return_value = []
-        self.crawler.handler_class.return_value = mock_handler
+        self.crawler.handler_factory.instance.return_value = mock_handler
+
         self.crawler.process_items(
             mock_handler, items, 1, 0, self.container_job)
         expected = [mock.call([{'ROWID': x} for x in range(0, total_rows)],
@@ -87,7 +87,7 @@ class TestContainerCrawler(unittest.TestCase):
                 mock.patch('container_crawler.Ring',
                            return_value=self.mock_ring):
             self.crawler = container_crawler.ContainerCrawler(
-                self.conf, self.mock_handler)
+                self.conf, self.mock_handler_factory)
         self.assertEqual(self.crawler.bulk, True)
 
         mock_handler = mock.Mock()
@@ -99,12 +99,12 @@ class TestContainerCrawler(unittest.TestCase):
                 [{'ROWID': 1, 'name': 'foo'}],
                 1, 0, self.container_job)
 
-    def test_failed_handler_class_constructor(self):
+    def test_failed_handler_factory_instance(self):
         self.mock_ring.get_nodes.return_value = ['part', []]
 
-        self.crawler.handler_class = mock.Mock()
-        self.crawler.handler_class.__name__ = 'MockHandler'
-        self.crawler.handler_class.side_effect = RuntimeError('oops')
+        self.crawler.handler_factory.__name__ = 'MockHandler'
+        self.crawler.handler_factory.instance.side_effect = RuntimeError(
+            'oops')
 
         self.crawler.logger = mock.Mock()
 
@@ -112,8 +112,8 @@ class TestContainerCrawler(unittest.TestCase):
                     'container': 'container'}
         self.crawler.conf['containers'] = [settings]
         self.crawler.run_once()
-        self.crawler.handler_class.assert_called_once_with(
-            '/var/scratch', settings, per_account=False)
+        self.crawler.handler_factory.instance.assert_called_once_with(
+            settings, per_account=False)
         self.crawler.logger.assert_has_calls([
             mock.call.error('Failed to process AUTH_account/container with '
                             'MockHandler'),
@@ -219,7 +219,7 @@ class TestContainerCrawler(unittest.TestCase):
             mock.call('Failed to process %s/%s with %s' % (
                 container['account'].decode('utf-8'),
                 container['container'].decode('utf-8'),
-                self.crawler.handler_class.__name__)),
+                str(self.crawler.handler_factory))),
             mock.call('traceback'))
 
     @mock.patch('container_crawler.time')
@@ -244,14 +244,13 @@ class TestContainerCrawler(unittest.TestCase):
         self.crawler.handle_container.side_effect = RuntimeError('oops')
         self.crawler.run_once()
 
-        expected_handler_calls = [mock.call(
-            self.conf['status_dir'], containers[0], per_account=False)]
+        expected_handler_calls = [mock.call(containers[0], per_account=False)]
         self.assertEqual(expected_handler_calls,
-                         self.mock_handler.call_args_list)
+                         self.mock_handler_factory.instance.call_args_list)
         expected_logger_calls = [
             mock.call("Container name not specified in settings -- continue"),
             mock.call("Failed to process foo/bar with %s" %
-                      (self.crawler.handler_class.__name__)),
+                      str(self.crawler.handler_factory)),
             mock.call('traceback'),
         ]
         self.assertEqual(expected_logger_calls,
@@ -267,11 +266,10 @@ class TestContainerCrawler(unittest.TestCase):
         ]
 
         self.crawler.run_once()
-        expected_calls = [mock.call(self.conf['status_dir'],
-                                    container, per_account=False)
+        expected_calls = [mock.call(container, per_account=False)
                           for container in self.crawler.conf['containers']]
         self.assertEquals(expected_calls,
-                          self.mock_handler.call_args_list)
+                          self.mock_handler_factory.instance.call_args_list)
 
     @mock.patch('os.path.exists')
     @mock.patch('container_crawler.ContainerBroker')
@@ -292,6 +290,9 @@ class TestContainerCrawler(unittest.TestCase):
         broker_mock.return_value.get_info.return_value = {'id': 12345}
 
         class FakeHandler(BaseSync):
+            def __init__(self, *args, **kwargs):
+                super(FakeHandler, self).__init__('', *args, **kwargs)
+
             def handle(self, row):
                 pass
 
@@ -301,7 +302,7 @@ class TestContainerCrawler(unittest.TestCase):
             def save_last_row(self, row_id, db_id):
                 pass
 
-        self.mock_handler.side_effect = FakeHandler
+        self.mock_handler_factory.instance.side_effect = FakeHandler
         node = {'ip': '127.0.0.1', 'port': '8888', 'device': '/dev/foobar'}
         self.crawler.container_ring.get_nodes.return_value = (
             'deadbeef', [node])
@@ -321,11 +322,11 @@ class TestContainerCrawler(unittest.TestCase):
         ls_mock.assert_called_once_with(
             '%s/%s' % (self.conf['status_dir'], account))
         expected_handler_calls = [
-            mock.call(self.conf['status_dir'],
-                      {'account': account, 'container': container},
+            mock.call({'account': account, 'container': container},
                       per_account=True)
             for container in test_containers]
-        self.mock_handler.assert_has_calls(expected_handler_calls)
+        self.mock_handler_factory.instance.assert_has_calls(
+            expected_handler_calls)
 
     @mock.patch('os.path.exists')
     @mock.patch('os.unlink')
@@ -374,7 +375,7 @@ class TestContainerCrawler(unittest.TestCase):
 
         handler_instance = mock.Mock()
         handler_instance.get_last_row.return_value = 1337
-        self.mock_handler.return_value = handler_instance
+        self.mock_handler_factory.instance.return_value = handler_instance
 
         self.crawler.conf = {'containers': [settings]}
         self.crawler.run_once()
@@ -398,7 +399,7 @@ class TestContainerCrawler(unittest.TestCase):
         fake_handler._account = settings['account']
         fake_handler._container = settings['container']
         fake_handler.get_last_row.return_value = 1337
-        self.mock_handler.return_value = fake_handler
+        self.mock_handler_factory.instance.return_value = fake_handler
         self.crawler.conf = {'containers': [settings]}
 
         with mock.patch('%s.get_info' % broker_class) as info_mock, \
@@ -414,8 +415,8 @@ class TestContainerCrawler(unittest.TestCase):
              mock.call.info(
                 'Processed 1 rows; verified 0 rows; last row: 42')],
             self.crawler.logger.mock_calls)
-        self.mock_handler.assert_called_once_with(
-            self.conf['status_dir'], settings, per_account=False)
+        self.mock_handler_factory.instance.assert_called_once_with(
+            settings, per_account=False)
         fake_handler.get_last_row.assert_called_once_with('deadbeef')
         fake_handler.handle.assert_called_once_with(
             {'name': 'object', 'ROWID': 42}, self.mock_ic)
@@ -451,8 +452,6 @@ class TestContainerCrawler(unittest.TestCase):
     def test_no_bulk_init(self, mock_ring, mock_ic):
         self.mock_ring = mock.Mock()
         mock_ring.return_value = self.mock_ring
-        self.mock_handler = mock.Mock()
-        self.mock_handler.__name__ = 'MockHandler'
 
         self.mock_ic = mock.Mock()
         mock_ic.return_value = self.mock_ic
@@ -464,7 +463,7 @@ class TestContainerCrawler(unittest.TestCase):
                      'workers': 50,
                      'enumerator_workers': 84}
         crawler = container_crawler.ContainerCrawler(
-            self.conf, self.mock_handler)
+            self.conf, self.mock_handler_factory)
         self.assertEqual(False, crawler.bulk)
         self.assertEqual(50, crawler._swift_pool.min_size)
         self.assertEqual(50, crawler._swift_pool.max_size)
@@ -483,7 +482,7 @@ class TestContainerCrawler(unittest.TestCase):
 
         mock_handler_instance = mock.Mock()
         mock_handler_instance.handler.side_effect = handler_progress
-        self.mock_handler.return_value = mock_handler_instance
+        self.mock_handler_factory.instance.return_value = mock_handler_instance
 
         containers = [
             {'account': u'fo\u00f2',
@@ -518,7 +517,7 @@ class TestContainerCrawler(unittest.TestCase):
 
         mock_handler_instance = mock.Mock()
         mock_handler_instance.handler.side_effect = handler_progress
-        self.mock_handler.return_value = mock_handler_instance
+        self.mock_handler_factory.instance.return_value = mock_handler_instance
 
         containers = [u'b\u00e1r', u'q\u00fax']
         self.crawler.conf['containers'] = [
@@ -546,8 +545,8 @@ class TestContainerCrawler(unittest.TestCase):
         self.assertEqual(0, len(self.crawler._in_progress_containers))
 
     def test_skip_non_local_containers(self):
-        self.mock_handler.return_value.side_effect = RuntimeError(
-            'Should not be called!')
+        self.mock_handler_factory.instance.return_value.side_effect =\
+            RuntimeError('Should not be called!')
 
         self.mock_ring.get_nodes.return_value = ['part', []]
         self.crawler.conf['containers'] = [
@@ -560,4 +559,5 @@ class TestContainerCrawler(unittest.TestCase):
         self.crawler._submit_containers()
         self.crawler.enumerator_queue.join()
         self.crawler.logger.error.assert_not_called()
-        self.mock_handler.return_value.save_last_row.assert_not_called()
+        self.mock_handler_factory.instance.return_value.save_last_row\
+            .assert_not_called()
